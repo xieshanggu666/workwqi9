@@ -77,8 +77,37 @@ const app = createApp({
         this.busy = false;
       }
     },
+    // 把当前工作台参数整体存为策略草稿（v1），随后可在策略库送审发布
+    async saveAsDraft() {
+      const name = (prompt("策略名称（将创建新策略的 v1 草稿）：") || "").trim();
+      if (!name) return;
+      const headers = {
+        "x-role": localStorage.getItem("bt_role") || "author",
+        "x-user": localStorage.getItem("bt_user") || "alice",
+      };
+      try {
+        const r = await API.strategies.create(
+          { name, snapshot: { market: { ...this.market }, strategy: { ...this.strategy }, trade: { ...this.trade } } },
+          headers
+        );
+        if (confirm(`已保存为「${r.name}」v1 草稿（${r.id}）。前往策略库送审？`)) location.href = "/strategies.html";
+      } catch (e) {
+        alert("保存失败：" + e.message);
+      }
+    },
   },
   mounted() {
+    // 从策略库「工作台打开」带入某版本的参数快照（旧版仍可直接回测调试）
+    try {
+      const raw = localStorage.getItem("bt_open_snapshot");
+      if (raw) {
+        localStorage.removeItem("bt_open_snapshot");
+        const snap = JSON.parse(raw);
+        if (snap.market) Object.assign(this.market, snap.market);
+        if (snap.strategy) Object.assign(this.strategy, snap.strategy);
+        if (snap.trade) Object.assign(this.trade, snap.trade);
+      }
+    } catch (e) { /* 忽略损坏的快照 */ }
     this.runAll();
   },
 });

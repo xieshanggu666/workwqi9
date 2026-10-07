@@ -18,6 +18,11 @@
         </div>
       </div>
       <div class="top-actions">
+        <nav class="nav-links">
+          <a href="/" class="active">工作台</a>
+          <a href="/strategies.html">策略库</a>
+        </nav>
+        <button class="btn" @click="saveAsDraft" :disabled="busy">☁ 存为策略草稿</button>
         <button class="btn primary" @click="runAll" :disabled="busy">{{ busy ? '计算中…' : '⚡ 生成行情并回测' }}</button>
       </div>
     </header>

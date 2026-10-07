@@ -20,10 +20,11 @@ invest_backtest/
 │   ├── indicators.js   技术指标（SMA/EMA/RSI/MACD/布林带/ATR）
 │   ├── backtest.js     回测撮合器（信号延迟一日、止损止盈、成本模型）
 │   ├── metrics.js      风险指标（年化/夏普/索提诺/最大回撤/卡玛）
-│   └── montecarlo.js   自助法蒙特卡洛模拟
-├── server.js           HTTP 服务（静态托管 + 回测 API）
-├── web/                Vue3 + Canvas 前端
-└── tests/              引擎测试套件
+│   ├── montecarlo.js   自助法蒙特卡洛模拟
+│   └── strategies.js   策略版本库（草稿→送审→发布工作流 + 参数快照运行）
+├── server.js           HTTP 服务（静态托管 + 回测/策略库 API）
+├── web/                Vue3 + Canvas 前端（工作台 + 策略库）
+└── tests/              引擎与工作流测试套件
 ```
 
 ## 核心语义
@@ -39,6 +40,18 @@ invest_backtest/
 - **风险指标**：收益序列采用对数收益，年化按 252 个交易日折算；下行波动只统计负收益；最大回撤记录回撤区间。
 - **蒙特卡洛**：对历史对数收益自助重采样生成模拟路径，输出 5%/50%/95% 分位带与亏损概率。
 
+## 策略版本与审核发布
+
+策略库（`/strategies.html`）为策略提供全生命周期管理，数据持久化于 `data/strategies.json`：
+
+- **版本状态机**：`草稿 → 待评审 → 已发布 / 已驳回`，待评审可撤回送审，已驳回可重新打开修订，已发布可撤回（`已撤回`）。
+- **角色权限**（页面右上角切换，经 `x-role`/`x-user` 请求头传递，缺省按投资者最小权限处理）：
+  - **策略作者**：存草稿、编辑草稿、送审；被驳回后重新打开；撤回已发布版本；任意版本均可直接回测试算。
+  - **评审员**：评审他人提交的版本——通过后发布、驳回则退回（必填评审意见）；可撤回已发布版本；不能评审自己撰写的策略。
+  - **投资者**：只能查看并运行「已发布」版本。
+- **参数快照**：每个版本固化一份 `行情 + 策略 + 交易` 三段参数快照，送审即冻结；回测、风险指标与蒙特卡洛（种子 = 行情种子 + 1）均由同一份快照驱动，同一版本重复运行结果逐位可复现。
+- **历史不可变**：每次运行追加一条不可变运行记录（指标、权益曲线、MC 亏损概率）；撤回版本只改状态，不删不改历史结果；已撤回/被取代的旧版本仍可由作者与评审员直接回测。
+
 ## API
 
 | 方法 | 路径 | 说明 |
@@ -47,7 +60,18 @@ invest_backtest/
 | POST | `/api/market` | 生成模拟行情 |
 | POST | `/api/backtest` | 行情 + 策略 + 交易参数，返回权益曲线/回撤/逐笔交易/风险指标 |
 | POST | `/api/montecarlo` | 对权益曲线做蒙特卡洛模拟 |
+| GET | `/api/strategies` | 策略列表（按角色过滤，投资者仅见已发布版本） |
+| POST | `/api/strategies` | 创建策略（含 v1 草稿），body: `{name, snapshot, note}` |
+| GET | `/api/strategies/:id` | 策略详情（含版本与运行记录） |
+| POST | `/api/strategies/:id/versions` | 基于既有版本派生新草稿，body: `{from}` |
+| PUT | `/api/strategies/:id/versions/:v` | 保存草稿参数快照（仅草稿可编辑） |
+| POST | `/api/strategies/:id/versions/:v/submit` | 送审（草稿 → 待评审） |
+| POST | `/api/strategies/:id/versions/:v/retract` | 撤回送审（待评审 → 草稿） |
+| POST | `/api/strategies/:id/versions/:v/review` | 评审（仅评审员），body: `{action: "approve"/"reject", comment}` |
+| POST | `/api/strategies/:id/versions/:v/reopen` | 重新打开（已驳回 → 草稿） |
+| POST | `/api/strategies/:id/versions/:v/withdraw` | 撤回已发布版本（历史结果保留） |
+| POST | `/api/strategies/:id/versions/:v/run` | 按版本参数快照运行回测 + 风险指标 + 蒙特卡洛，并记录历史 |
 
 ## 测试
 
-`npm test` 覆盖指标手算、撮合时点、止损语义、成本模型、最大回撤、蒙特卡洛统计性质、ATR 动态止损止盈、可追踪（逐日调整）规则、波动状态与旧参数复现等 35 个用例。
+`npm test` 覆盖指标手算、撮合时点、止损语义、成本模型、最大回撤、蒙特卡洛统计性质、ATR 动态止损止盈、可追踪（逐日调整）规则、波动状态、旧参数复现，以及策略版本状态机、角色权限、快照一致性、撤回保历史、旧版复跑与持久化等 43 个用例。

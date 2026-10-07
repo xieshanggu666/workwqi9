@@ -428,5 +428,157 @@ t("追踪模式全链路：权益曲线、风险指标与蒙特卡洛同步", ()
   assert(sim.prob_loss >= 0 && sim.prob_loss <= 1);
 });
 
+// ===== 策略版本与审核发布工作流 =====
+const { createStore } = require("../engine/strategies");
+
+function mkSnap(slow) {
+  return {
+    market: { seed: 42, days: 400, start: 100, drift: 0.0004, vol: 0.012 },
+    strategy: { type: "ma_cross", fast: 10, slow: slow || 30 },
+    trade: { cash: 100000, feeRate: 0.0005, slippageBp: 5, stopLoss: 0.05, takeProfit: 0.15 },
+  };
+}
+function approvedStore(slow) {
+  const store = createStore(null);
+  store.create({ name: "双均线", user: "alice", snapshot: mkSnap(slow) });
+  store.submit("s1", 1, "alice");
+  store.review("s1", 1, { user: "bob", action: "approve" });
+  return store;
+}
+
+t("草稿→送审→发布全流程状态流转", () => {
+  const store = createStore(null);
+  const s = store.create({ name: "双均线", user: "alice", snapshot: mkSnap() });
+  assert.strictEqual(s.id, "s1");
+  assert.strictEqual(s.versions[0].status, "draft");
+  assert.strictEqual(s.versions[0].v, 1);
+  store.updateDraft("s1", 1, { user: "alice", snapshot: mkSnap(50), note: "放慢慢线" });
+  assert.strictEqual(store.get("s1", "author", "alice").versions[0].snapshot.strategy.slow, 50);
+  store.submit("s1", 1, "alice");
+  assert.strictEqual(store.get("s1", "author", "alice").versions[0].status, "pending");
+  // 送审后快照冻结，不可再编辑
+  assert.throws(() => store.updateDraft("s1", 1, { user: "alice", snapshot: mkSnap() }), /草稿状态/);
+  const pub = store.review("s1", 1, { user: "bob", action: "approve" });
+  assert.strictEqual(pub.versions[0].status, "published");
+  assert(pub.versions[0].published_at);
+});
+
+t("驳回退回→重新打开→再送审", () => {
+  const store = createStore(null);
+  store.create({ name: "双均线", user: "alice", snapshot: mkSnap() });
+  store.submit("s1", 1, "alice");
+  assert.throws(() => store.review("s1", 1, { user: "bob", action: "reject" }), /评审意见/);
+  store.review("s1", 1, { user: "bob", action: "reject", comment: "止损过宽" });
+  const v = store.get("s1", "author", "alice").versions[0];
+  assert.strictEqual(v.status, "rejected");
+  assert.strictEqual(v.review_comment, "止损过宽");
+  store.reopen("s1", 1, "alice");
+  assert.strictEqual(store.get("s1", "author", "alice").versions[0].status, "draft");
+  store.submit("s1", 1, "alice");
+  store.review("s1", 1, { user: "bob", action: "approve" });
+  assert.strictEqual(store.get("s1", "author", "alice").versions[0].status, "published");
+});
+
+t("权限：非作者不可编辑，作者不可自审，投资者不可见未发布版本", () => {
+  const store = createStore(null);
+  store.create({ name: "双均线", user: "alice", snapshot: mkSnap() });
+  assert.throws(() => store.updateDraft("s1", 1, { user: "carol", snapshot: mkSnap() }), /作者本人/);
+  assert.throws(() => store.submit("s1", 1, "carol"), /作者本人/);
+  store.submit("s1", 1, "alice");
+  assert.throws(() => store.review("s1", 1, { user: "alice", action: "approve" }), /自己撰写/);
+  // 投资者在列表与详情中都看不到未发布版本
+  assert.strictEqual(store.list("investor", "carol").length, 0);
+  assert.throws(() => store.get("s1", "investor", "carol"), /403|可见/);
+  // 评审员可见待审版本
+  assert.strictEqual(store.list("reviewer", "bob")[0].versions[0].status, "pending");
+});
+
+t("投资者只能运行已发布版本", () => {
+  const store = createStore(null);
+  store.create({ name: "双均线", user: "alice", snapshot: mkSnap() });
+  assert.throws(() => store.run("s1", 1, { role: "investor", user: "carol" }), /已发布版本/);
+  // 作者可试算自己的草稿
+  const draft = store.run("s1", 1, { role: "author", user: "alice" });
+  assert.strictEqual(draft.status, "draft");
+  store.submit("s1", 1, "alice");
+  store.review("s1", 1, { user: "bob", action: "approve" });
+  const pub = store.run("s1", 1, { role: "investor", user: "carol" });
+  assert.strictEqual(pub.status, "published");
+  assert.strictEqual(pub.run_by, "carol");
+});
+
+t("回测、风险指标与蒙特卡洛共用同一参数快照", () => {
+  const store = approvedStore();
+  const run = store.run("s1", 1, { role: "investor", user: "carol" });
+  // 用同一快照直接调引擎，三者必须逐位一致
+  const snap = mkSnap();
+  const m = market.generateMarket(snap.market);
+  const r = bt.backtest(m, { ...snap.trade, strategy: snap.strategy });
+  const s = metrics.summarize(r.equity, {});
+  const sim = mc.simulate(r.equity, 300, 252, snap.market.seed + 1);
+  assert.strictEqual(run.final_equity, Math.round(r.final_equity * 100) / 100);
+  assert.strictEqual(run.stats.sharpe, s.sharpe);
+  assert.strictEqual(run.stats.max_drawdown, s.max_drawdown);
+  assert.strictEqual(run.mc.prob_loss, Math.round(sim.prob_loss * 10000) / 10000);
+  assert.strictEqual(run.mc.seed, snap.market.seed + 1);
+  assert.strictEqual(run.equity.length, r.equity.length);
+});
+
+t("撤回不改历史结果，旧版仍可直接回测", () => {
+  const store = approvedStore();
+  store.run("s1", 1, { role: "investor", user: "carol" });
+  store.run("s1", 1, { role: "author", user: "alice" });
+  const before = store.get("s1", "author", "alice").versions[0].runs.map(r => r.id);
+  store.withdraw("s1", 1, "alice");
+  const after = store.get("s1", "author", "alice").versions[0];
+  assert.strictEqual(after.status, "withdrawn");
+  assert.deepStrictEqual(after.runs.map(r => r.id), before); // 历史结果原样保留
+  // 投资者不再可见、不可运行已撤回版本
+  assert.strictEqual(store.list("investor", "carol").length, 0);
+  assert.throws(() => store.run("s1", 1, { role: "investor", user: "carol" }), /已发布版本/);
+  // 作者/评审员仍可直接回测旧版
+  const r1 = store.run("s1", 1, { role: "author", user: "alice" });
+  const r2 = store.run("s1", 1, { role: "reviewer", user: "bob" });
+  assert.strictEqual(r1.final_equity, r2.final_equity);
+  assert.strictEqual(store.get("s1", "author", "alice").versions[0].runs.length, before.length + 2);
+});
+
+t("派生新版本不影响已发布快照，新旧版本均可独立回测", () => {
+  const store = approvedStore(30);
+  store.addVersion("s1", { user: "alice" });
+  store.updateDraft("s1", 2, { user: "alice", snapshot: mkSnap(50) });
+  const s = store.get("s1", "author", "alice");
+  assert.strictEqual(s.versions[0].snapshot.strategy.slow, 30); // v1 已发布快照不变
+  assert.strictEqual(s.versions[1].snapshot.strategy.slow, 50);
+  const r1 = store.run("s1", 1, { role: "investor", user: "carol" });
+  const r2 = store.run("s1", 2, { role: "author", user: "alice" });
+  assert.notStrictEqual(r1.final_equity, r2.final_equity);
+  // 投资者只见 v1（已发布），作者见全部
+  const inv = store.list("investor", "carol")[0];
+  assert.strictEqual(inv.versions.length, 1);
+  assert.strictEqual(inv.versions[0].v, 1);
+});
+
+t("策略库持久化后可完整重载", () => {
+  const os = require("os");
+  const path = require("path");
+  const fs = require("fs");
+  const f = path.join(os.tmpdir(), "strategies-test-" + process.pid + ".json");
+  try {
+    const a = createStore(f);
+    a.create({ name: "双均线", user: "alice", snapshot: mkSnap() });
+    a.submit("s1", 1, "alice");
+    a.review("s1", 1, { user: "bob", action: "approve" });
+    a.run("s1", 1, { role: "investor", user: "carol" });
+    const b = createStore(f);
+    const v = b.get("s1", "author", "alice").versions[0];
+    assert.strictEqual(v.status, "published");
+    assert.strictEqual(v.runs.length, 1);
+    assert.strictEqual(v.snapshot.strategy.slow, 30);
+  } finally {
+    try { fs.unlinkSync(f); } catch (e) {}
+  }
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

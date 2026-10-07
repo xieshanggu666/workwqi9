@@ -27,4 +27,33 @@ const API = {
       body: JSON.stringify({ equity, nPaths, nSteps, seed }),
     });
   },
+  strategies: {
+    list(headers) {
+      return API._req("/api/strategies", { headers: headers || {} });
+    },
+    create(body, headers) {
+      return API._req("/api/strategies", {
+        method: "POST", headers: { "Content-Type": "application/json", ...(headers || {}) },
+        body: JSON.stringify(body),
+      });
+    },
+    addVersion(id, body, headers) {
+      return API._req(`/api/strategies/${id}/versions`, {
+        method: "POST", headers: { "Content-Type": "application/json", ...(headers || {}) },
+        body: JSON.stringify(body || {}),
+      });
+    },
+    updateDraft(id, v, body, headers) {
+      return API._req(`/api/strategies/${id}/versions/${v}`, {
+        method: "PUT", headers: { "Content-Type": "application/json", ...(headers || {}) },
+        body: JSON.stringify(body),
+      });
+    },
+    action(id, v, action, body, headers) {
+      return API._req(`/api/strategies/${id}/versions/${v}/${action}`, {
+        method: "POST", headers: { "Content-Type": "application/json", ...(headers || {}) },
+        body: JSON.stringify(body || {}),
+      });
+    },
+  },
 };
