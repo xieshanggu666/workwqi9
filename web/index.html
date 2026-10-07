@@ -18,73 +18,238 @@
         </div>
       </div>
       <div class="top-actions">
-        <button class="btn primary" @click="runAll" :disabled="busy">{{ busy ? '计算中…' : '⚡ 生成行情并回测' }}</button>
+        <nav class="tabs">
+          <button class="tab" :class="{ active: tab === 'library' }" @click="switchTab('library')">策略库</button>
+          <button class="tab" :class="{ active: tab === 'sandbox' }" @click="switchTab('sandbox')">沙箱试算</button>
+        </nav>
+        <label class="role-switch">当前角色
+          <select v-model="role" @change="changeRole">
+            <option value="author">策略作者</option>
+            <option value="reviewer">评审员</option>
+            <option value="investor">投资者</option>
+          </select>
+        </label>
       </div>
     </header>
 
-    <div class="panel-row">
-      <section class="panel">
-        <h3>市场参数</h3>
-        <label>随机种子 <input type="number" v-model.number="market.seed" step="1"></label>
-        <label>交易日数 <input type="range" min="60" max="1200" step="10" v-model.number="market.days"> {{ market.days }}</label>
-        <label>初始价格 <input type="number" v-model.number="market.start" step="1"></label>
-        <label>日漂移 <input type="number" v-model.number="market.drift" step="0.0001"></label>
-        <label>日波动 <input type="number" v-model.number="market.vol" step="0.001"></label>
-      </section>
+    <!-- ========== 策略库 ========== -->
+    <template v-if="tab === 'library' && !editor.open">
+      <div class="lib-grid">
+        <section class="panel lib-list">
+          <h3>策略列表</h3>
+          <div class="new-strategy" v-if="role === 'author'">
+            <input v-model="newTitle" placeholder="新策略名称" @keyup.enter="createStrategy">
+            <button class="btn primary" @click="createStrategy" :disabled="busy || !newTitle.trim()">＋ 新建策略</button>
+          </div>
+          <p class="hint" v-if="!strategies.length">还没有策略。作者可新建一个，从草稿开始：送审 → 评审 → 发布。</p>
+          <div v-for="s in strategies" :key="s.id"
+               class="lib-item" :class="{ active: current && current.id === s.id }"
+               @click="openStrategy(s.id)">
+            <div class="lib-item-main">
+              <div class="lib-item-title">{{ s.title }}</div>
+              <div class="lib-item-meta">
+                <span v-if="s.published_version != null" class="badge published">当前 v{{ s.published_version }}</span>
+                <span v-if="s.open_version != null" class="badge" :class="s.open_status">v{{ s.open_version }} {{ stLabel(s.open_status) }}</span>
+                <span v-if="s.published_version == null && s.open_version == null" class="badge withdrawn">无发布版本</span>
+              </div>
+            </div>
+            <div class="lib-item-runs">{{ s.run_count }} 次运行</div>
+          </div>
+        </section>
 
-      <section class="panel">
-        <h3>策略</h3>
-        <label>类型
-          <select v-model="strategy.type">
-            <option value="ma_cross">均线金叉</option>
-            <option value="rsi">RSI 超买超卖</option>
-            <option value="boll">布林带回归</option>
-            <option value="buy_hold">买入持有</option>
-          </select>
-        </label>
-        <template v-if="strategy.type === 'ma_cross'">
-          <label>快线 <input type="number" v-model.number="strategy.fast" step="1"></label>
-          <label>慢线 <input type="number" v-model.number="strategy.slow" step="1"></label>
-        </template>
-        <template v-else-if="strategy.type === 'rsi'">
-          <label>RSI 周期 <input type="number" v-model.number="strategy.rsiN" step="1"></label>
-          <label>超卖买入 <input type="number" v-model.number="strategy.rsiBuy" step="1"></label>
-          <label>超买卖出 <input type="number" v-model.number="strategy.rsiSell" step="1"></label>
-        </template>
-        <template v-else-if="strategy.type === 'boll'">
-          <label>布林周期 <input type="number" v-model.number="strategy.bbN" step="1"></label>
-          <label>倍数 <input type="number" v-model.number="strategy.bbK" step="0.1"></label>
-        </template>
-      </section>
+        <section class="panel lib-detail" v-if="current">
+          <div class="detail-head">
+            <div>
+              <h3>{{ current.title }}</h3>
+              <p class="hint">{{ current.description || '（无描述）' }}</p>
+            </div>
+            <div class="detail-actions">
+              <button class="btn" v-if="role === 'author' && current.published_version != null"
+                      @click="withdraw" :disabled="busy">↩ 撤回当前版本</button>
+              <button class="btn primary" v-if="role === 'author' && canCreateDraft"
+                      @click="newDraft" :disabled="busy">✎ 基于{{ current.published_version != null ? ' v' + current.published_version : '上一版' }}新建草稿</button>
+            </div>
+          </div>
 
-      <section class="panel">
-        <h3>交易参数</h3>
-        <label>初始资金 <input type="number" v-model.number="trade.cash" step="1000"></label>
-        <label>手续费率 <input type="number" v-model.number="trade.feeRate" step="0.0001"></label>
-        <label>滑点(bp) <input type="number" v-model.number="trade.slippageBp" step="1"></label>
-        <label>止损模式
-          <select v-model="trade.stopMode">
-            <option value="fixed">固定比例</option>
-            <option value="atr">ATR 动态（按波动状态）</option>
-            <option value="trail">ATR 追踪（逐日调整）</option>
-          </select>
-        </label>
-        <template v-if="trade.stopMode === 'fixed'">
-          <label>止损比例 <input type="number" v-model.number="trade.stopLoss" step="0.01"></label>
-          <label>止盈比例 <input type="number" v-model.number="trade.takeProfit" step="0.01"></label>
-        </template>
-        <template v-else>
-          <label>ATR 周期 <input type="number" v-model.number="trade.atrN" step="1" min="2"></label>
-          <label>止损 ATR 倍数 <input type="number" v-model.number="trade.atrStopMult" step="0.1"></label>
-          <label>止盈 ATR 倍数 <input type="number" v-model.number="trade.atrTargetMult" step="0.1"></label>
-          <label>波动窗口 <input type="number" v-model.number="trade.atrVolN" step="1" min="2"></label>
-          <label>低波动乘数 <input type="number" v-model.number="trade.volLowMult" step="0.1"></label>
-          <label>高波动乘数 <input type="number" v-model.number="trade.volHighMult" step="0.1"></label>
-          <p class="hint" v-if="trade.stopMode === 'atr'">触发距离 = 入场前 ATR × 倍数 × 波动乘数，入场当日锁定；高波动放宽、低波动收紧。预热期 ATR 不足时回退固定比例。</p>
-          <p class="hint" v-else>追踪规则：每个交易日按最新 ATR 与波动状态重算退出价——止损锚定持仓期最高收盘价、只紧不松，止盈随波动每日收放；预热期回退固定比例。</p>
-        </template>
-        <label>仓位比例 <input type="range" min="0.1" max="1" step="0.05" v-model.number="trade.positionRatio"> {{ (trade.positionRatio*100).toFixed(0) }}%</label>
-      </section>
+          <h4>版本（{{ current.versions.length }}）</h4>
+          <div class="table-wrap lib-table">
+            <table>
+              <thead><tr>
+                <th>版本</th><th>状态</th><th>基于</th><th>参数快照</th><th>送审时间</th><th>发布时间</th><th>评审意见</th><th>操作</th>
+              </tr></thead>
+              <tbody>
+                <tr v-for="v in current.versions.slice().reverse()" :key="v.version">
+                  <td>
+                    v{{ v.version }}
+                    <span v-if="v.is_current" class="cur-tag">当前发布</span>
+                  </td>
+                  <td><span class="badge" :class="v.status">{{ v.status_label }}</span></td>
+                  <td>{{ v.base_version != null ? 'v' + v.base_version : '—' }}</td>
+                  <td><code class="hash" :title="v.snapshot_hash">{{ v.snapshot_hash.slice(0, 8) }}</code></td>
+                  <td>{{ fmtTime(v.submitted_at) }}</td>
+                  <td>{{ fmtTime(v.published_at) }}</td>
+                  <td class="review-cell">
+                    <template v-if="v.review">
+                      <span :class="v.review.decision === 'approve' ? 'up' : 'down'">
+                        {{ v.review.decision === 'approve' ? '通过' : '驳回' }}
+                      </span>
+                      <span class="hint" v-if="v.review.comment">：{{ v.review.comment }}</span>
+                    </template>
+                    <template v-else>—</template>
+                    <div class="hint" v-if="v.status === 'withdrawn' && v.withdraw_comment">撤回：{{ v.withdraw_comment }}</div>
+                  </td>
+                  <td class="actions-cell">
+                    <button class="btn mini" v-if="v.can_edit" @click="openEditor(v)">编辑</button>
+                    <button class="btn mini" v-if="role === 'author' && (v.status === 'draft' || v.status === 'rejected')"
+                            @click="trialStored(v.version)" :disabled="busy">试算</button>
+                    <button class="btn mini primary" v-if="v.can_submit" @click="submitFromList(v)" :disabled="busy">送审</button>
+                    <button class="btn mini ok" v-if="v.can_review" @click="decide(v.version, 'approve')" :disabled="busy">通过</button>
+                    <button class="btn mini danger" v-if="v.can_review" @click="decide(v.version, 'reject')" :disabled="busy">驳回</button>
+                    <button class="btn mini" :class="{ primary: v.is_current }"
+                            v-if="v.can_run" @click="runVersion(v.version)" :disabled="busy">▶ 运行</button>
+                    <span class="hint" v-if="!v.can_run && !v.can_edit && !v.can_submit && !v.can_review">{{ v.run_blocked_reason }}</span>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h4>历史运行记录（{{ current.runs.length }}，只追加，撤回不改写）</h4>
+          <div class="table-wrap lib-table">
+            <table>
+              <thead><tr>
+                <th>运行</th><th>版本</th><th>角色</th><th>快照</th><th>MC种子</th><th>终值</th><th>总收益</th><th>夏普</th><th>最大回撤</th><th>亏损概率</th><th>交易数</th><th>时间</th>
+              </tr></thead>
+              <tbody>
+                <tr v-for="r in current.runs" :key="r.id">
+                  <td><code class="hash">{{ r.id }}</code></td>
+                  <td>v{{ r.version }}</td>
+                  <td>{{ roleLabel(r.role) }}</td>
+                  <td><code class="hash" :title="r.snapshot_hash">{{ r.snapshot_hash.slice(0, 8) }}</code></td>
+                  <td>{{ r.mc_seed }}</td>
+                  <td>{{ r.final_equity.toFixed(0) }}</td>
+                  <td :class="r.total_return >= 0 ? 'up' : 'down'">{{ (r.total_return * 100).toFixed(2) }}%</td>
+                  <td>{{ r.stats.sharpe.toFixed(2) }}</td>
+                  <td class="down">{{ (r.stats.max_drawdown * 100).toFixed(2) }}%</td>
+                  <td>{{ r.prob_loss == null ? '—' : (r.prob_loss * 100).toFixed(1) + '%' }}</td>
+                  <td>{{ r.n_trades }}</td>
+                  <td>{{ fmtTime(r.created_at) }}</td>
+                </tr>
+                <tr v-if="!current.runs.length"><td colspan="12" class="hint">尚无运行记录。冻结后的版本（送审起）可运行并在此留痕。</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    </template>
+
+    <!-- ========== 草稿/沙箱参数编辑 ========== -->
+    <template v-if="tab === 'sandbox' || editor.open">
+      <div class="editor-bar panel" v-if="editor.open">
+        <div>
+          <strong>编辑 {{ current.title }} v{{ editor.version }}</strong>
+          <span class="hint">　草稿参数不会影响任何已冻结版本；点「送审」时冻结快照，之后回测/风险指标/蒙特卡洛都以此快照为准。</span>
+        </div>
+        <div class="detail-actions">
+          <button class="btn" @click="trialDraft" :disabled="busy">试算（不留痕）</button>
+          <button class="btn" @click="saveDraft" :disabled="busy">保存草稿</button>
+          <button class="btn primary" @click="saveAndSubmit" :disabled="busy">保存并送审</button>
+          <button class="btn" @click="cancelEditor">取消</button>
+        </div>
+      </div>
+
+      <div class="panel-row panel-row-4">
+        <section class="panel">
+          <h3>市场参数</h3>
+          <label>随机种子 <input type="number" v-model.number="model.market.seed" step="1"></label>
+          <label>交易日数 <input type="range" min="60" max="1200" step="10" v-model.number="model.market.days"> {{ model.market.days }}</label>
+          <label>初始价格 <input type="number" v-model.number="model.market.start" step="1"></label>
+          <label>日漂移 <input type="number" v-model.number="model.market.drift" step="0.0001"></label>
+          <label>日波动 <input type="number" v-model.number="model.market.vol" step="0.001"></label>
+        </section>
+
+        <section class="panel">
+          <h3>策略</h3>
+          <label>类型
+            <select v-model="model.strategy.type">
+              <option value="ma_cross">均线金叉</option>
+              <option value="rsi">RSI 超买超卖</option>
+              <option value="boll">布林带回归</option>
+              <option value="buy_hold">买入持有</option>
+            </select>
+          </label>
+          <template v-if="model.strategy.type === 'ma_cross'">
+            <label>快线 <input type="number" v-model.number="model.strategy.fast" step="1"></label>
+            <label>慢线 <input type="number" v-model.number="model.strategy.slow" step="1"></label>
+          </template>
+          <template v-else-if="model.strategy.type === 'rsi'">
+            <label>RSI 周期 <input type="number" v-model.number="model.strategy.rsiN" step="1"></label>
+            <label>超卖买入 <input type="number" v-model.number="model.strategy.rsiBuy" step="1"></label>
+            <label>超买卖出 <input type="number" v-model.number="model.strategy.rsiSell" step="1"></label>
+          </template>
+          <template v-else-if="model.strategy.type === 'boll'">
+            <label>布林周期 <input type="number" v-model.number="model.strategy.bbN" step="1"></label>
+            <label>倍数 <input type="number" v-model.number="model.strategy.bbK" step="0.1"></label>
+          </template>
+        </section>
+
+        <section class="panel">
+          <h3>交易参数</h3>
+          <label>初始资金 <input type="number" v-model.number="model.options.cash" step="1000"></label>
+          <label>手续费率 <input type="number" v-model.number="model.options.feeRate" step="0.0001"></label>
+          <label>滑点(bp) <input type="number" v-model.number="model.options.slippageBp" step="1"></label>
+          <label>止损模式
+            <select v-model="model.options.stopMode">
+              <option value="fixed">固定比例</option>
+              <option value="atr">ATR 动态（按波动状态）</option>
+              <option value="trail">ATR 追踪（逐日调整）</option>
+            </select>
+          </label>
+          <template v-if="model.options.stopMode === 'fixed'">
+            <label>止损比例 <input type="number" v-model.number="model.options.stopLoss" step="0.01"></label>
+            <label>止盈比例 <input type="number" v-model.number="model.options.takeProfit" step="0.01"></label>
+          </template>
+          <template v-else>
+            <label>ATR 周期 <input type="number" v-model.number="model.options.atrN" step="1" min="2"></label>
+            <label>止损 ATR 倍数 <input type="number" v-model.number="model.options.atrStopMult" step="0.1"></label>
+            <label>止盈 ATR 倍数 <input type="number" v-model.number="model.options.atrTargetMult" step="0.1"></label>
+            <label>波动窗口 <input type="number" v-model.number="model.options.atrVolN" step="1" min="2"></label>
+            <label>低波动乘数 <input type="number" v-model.number="model.options.volLowMult" step="0.1"></label>
+            <label>高波动乘数 <input type="number" v-model.number="model.options.volHighMult" step="0.1"></label>
+            <p class="hint" v-if="model.options.stopMode === 'atr'">触发距离 = 入场前 ATR × 倍数 × 波动乘数，入场当日锁定；高波动放宽、低波动收紧。预热期 ATR 不足时回退固定比例。</p>
+            <p class="hint" v-else>追踪规则：每个交易日按最新 ATR 与波动状态重算退出价——止损锚定持仓期最高收盘价、只紧不松，止盈随波动每日收放；预热期回退固定比例。</p>
+          </template>
+          <label>仓位比例 <input type="range" min="0.1" max="1" step="0.05" v-model.number="model.options.positionRatio"> {{ (model.options.positionRatio*100).toFixed(0) }}%</label>
+        </section>
+
+        <section class="panel">
+          <h3>蒙特卡洛</h3>
+          <p class="hint">回测、风险指标与蒙特卡洛共用同一份参数快照。</p>
+          <label>路径数 <input type="number" v-model.number="model.montecarlo.nPaths" step="50" min="20" max="2000"></label>
+          <label>模拟步数 <input type="number" v-model.number="model.montecarlo.nSteps" step="10" min="10" max="2000"></label>
+          <label>种子策略
+            <select v-model="model.montecarlo.seedStrategy">
+              <option value="market_offset">随市场种子（seed+1，可复现）</option>
+              <option value="explicit">固定种子</option>
+            </select>
+          </label>
+          <label v-if="model.montecarlo.seedStrategy === 'explicit'">固定种子 <input type="number" v-model.number="model.montecarlo.seed" step="1"></label>
+          <label>无风险利率 <input type="number" v-model.number="model.options.riskFree" step="0.001"></label>
+          <label>年交易日 <input type="number" v-model.number="model.options.periodsPerYear" step="1"></label>
+          <div class="sandbox-actions" v-if="tab === 'sandbox'">
+            <button class="btn primary" @click="runAll" :disabled="busy">{{ busy ? '计算中…' : '⚡ 按当前快照运行' }}</button>
+            <button class="btn" v-if="role === 'author'" @click="saveAsNewStrategy" :disabled="busy">💾 存为策略草稿</button>
+          </div>
+        </section>
+      </div>
+    </template>
+
+    <!-- ========== 结果区（沙箱 / 草稿试算 / 版本运行共用） ========== -->
+    <div class="result-banner" v-if="source">
+      <span>当前结果：<strong>{{ source.label }}</strong></span>
+      <span class="hint">快照 <code class="hash">{{ source.hash.slice(0, 10) }}</code></span>
+      <span class="hint" v-if="source.runId">运行 <code class="hash">{{ source.runId }}</code></span>
+      <span class="hint">MC 种子 {{ source.mcSeed }}</span>
     </div>
 
     <div class="stats-row" v-if="stats">
@@ -95,26 +260,23 @@
       <div class="stat-card"><div class="stat-v down">{{ (stats.max_drawdown*100).toFixed(2) }}%</div><div class="stat-k">最大回撤</div></div>
       <div class="stat-card"><div class="stat-v">{{ stats.calmar.toFixed(2) }}</div><div class="stat-k">卡玛</div></div>
       <div class="stat-card"><div class="stat-v">{{ (stats.win_rate*100).toFixed(1) }}%</div><div class="stat-k">胜率</div></div>
-      <div class="stat-card"><div class="stat-v">{{ stats.profit_factor === Infinity ? '∞' : stats.profit_factor.toFixed(2) }}</div><div class="stat-k">盈亏比</div></div>
+      <div class="stat-card"><div class="stat-v">{{ mcProbLabel }}</div><div class="stat-k">MC亏损概率</div></div>
     </div>
 
-    <div class="chart-grid">
+    <div class="chart-grid" v-if="equity">
       <section class="panel chart-panel">
         <h3>行情与信号</h3>
         <canvas ref="kchart" class="chart-canvas"></canvas>
       </section>
       <section class="panel chart-panel">
-        <h3>权益曲线与回撤</h3>
+        <h3>权益曲线、回撤与蒙特卡洛分位带</h3>
         <canvas ref="echart" class="chart-canvas"></canvas>
-        <div class="mc-row">
-          <button class="btn" @click="runMonteCarlo" :disabled="busy">🎲 蒙特卡洛模拟</button>
-          <span v-if="mc" class="mc-info">亏损概率 {{ (mc.prob_loss*100).toFixed(1) }}%</span>
-        </div>
-        <canvas ref="mchart" class="chart-canvas" v-if="mc"></canvas>
+        <canvas ref="mchart" class="chart-canvas mc-canvas" v-if="mcQuant"></canvas>
+        <p class="hint" v-if="mcProb != null">蒙特卡洛亏损概率（{{ mcPaths }} 条路径 / {{ mcSteps }} 步，种子 {{ source.mcSeed }}）：{{ (mcProb*100).toFixed(1) }}%</p>
       </section>
     </div>
 
-    <section class="panel" v-if="trades.length">
+    <section class="panel" v-if="trades.length" style="margin: 0 22px 14px;">
       <h3>逐笔交易（{{ trades.length }} 笔）</h3>
       <div class="table-wrap">
         <table>
